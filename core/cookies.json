@@ -1,0 +1,92 @@
+[
+    {
+        "domain": "chat.deepseek.com",
+        "expirationDate": 1781591358.381864,
+        "hostOnly": true,
+        "httpOnly": false,
+        "name": "smidV2",
+        "path": "/",
+        "sameSite": null,
+        "secure": false,
+        "session": false,
+        "storeId": null,
+        "value": "2025121813291801561f4dfdc410939ba24cc5db7831be008d8a4c1a97d2130"
+    },
+    {
+        "domain": ".deepseek.com",
+        "expirationDate": 1766649144,
+        "hostOnly": false,
+        "httpOnly": false,
+        "name": "intercom-session-guh50jw4",
+        "path": "/",
+        "sameSite": "lax",
+        "secure": true,
+        "session": false,
+        "storeId": null,
+        "value": "ZHV3WUtlajNiMTFJVXVRd1dVZTJRMXFqZ2dlVzIweXJwU3A4cyttK2NNc25BU1JKTktvUW12OCtNcEhCUlFNZE9OU3dOY1FZcUJ6MnlDYU9xbTdqZlAzeGhjT1c5bTVMOFUzRmpCd2xrSXc9LS05MTdYdlZ5M1lpcnFOSmQ2b0gvQ1NRPT0=--38a1bedd9660e20d6b840bb9a168ecf06c3a082d"
+    },
+    {
+        "domain": "chat.deepseek.com",
+        "expirationDate": 1771223358,
+        "hostOnly": true,
+        "httpOnly": false,
+        "name": "_gc_usr_id_cs0_d0_sec0_part0",
+        "path": "/",
+        "sameSite": "strict",
+        "secure": false,
+        "session": false,
+        "storeId": null,
+        "value": "fc640cae-3988-4f6b-b1a5-cf880aa63b71"
+    },
+    {
+        "domain": "chat.deepseek.com",
+        "expirationDate": 1781591358.372339,
+        "hostOnly": true,
+        "httpOnly": false,
+        "name": ".thumbcache_6b2e5483f9d858d7c661c5e276b6a6ae",
+        "path": "/",
+        "sameSite": null,
+        "secure": false,
+        "session": false,
+        "storeId": null,
+        "value": ""
+    },
+    {
+        "domain": ".deepseek.com",
+        "expirationDate": 1781596347.13663,
+        "hostOnly": false,
+        "httpOnly": false,
+        "name": "intercom-device-id-guh50jw4",
+        "path": "/",
+        "sameSite": "lax",
+        "secure": true,
+        "session": false,
+        "storeId": null,
+        "value": "1058e510-6de9-40bd-87fd-31b71466069c"
+    },
+    {
+        "domain": "chat.deepseek.com",
+        "expirationDate": 1766049025,
+        "hostOnly": true,
+        "httpOnly": false,
+        "name": "_gc_s_cs0_d0_sec0_part0",
+        "path": "/",
+        "sameSite": "strict",
+        "secure": false,
+        "session": false,
+        "storeId": null,
+        "value": "rum=1&id=92ec720f-0374-4bc6-a97b-afa86773d03b&created=1766043829169&expire=1766049025766"
+    },
+    {
+        "domain": "chat.deepseek.com",
+        "hostOnly": true,
+        "httpOnly": true,
+        "name": "ds_session_id",
+        "path": "/",
+        "sameSite": "strict",
+        "secure": true,
+        "session": true,
+        "storeId": null,
+        "value": "05fa097040d4464eab4615fe0bf01227"
+    }
+]
