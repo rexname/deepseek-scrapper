@@ -1,5 +1,6 @@
 import asyncio
 from core.session_manager import BrowserlessSessionManager
+from core.chat_handler import DeepSeekChatHandler
 from core import config
 
 async def main():
@@ -87,31 +88,47 @@ async def main():
             raise
         
         # Simpan session baru
-        print("🔍 Checking cookies before save...")
-        cookies_before = await app.context.cookies()
-        ds_session_before = next((c for c in cookies_before if c['name'] == 'ds_session_id'), None)
-        
         await app.save_session()
+
+    # --- CHAT INTERACTION START ---
+    chat = DeepSeekChatHandler(page)
+    
+    print("\n💬 Mode Chat Aktif. Ketik 'exit' untuk keluar.")
+    
+    while True:
+        # Ambil input dari user secara async
+        user_message = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input("\n👤 Anda: ").strip()
+        )
         
-        # Verifikasi session setelah save
-        print("🔍 Verifying saved session...")
-        cookies_after = await app.context.cookies()
-        ds_session_after = next((c for c in cookies_after if c['name'] == 'ds_session_id'), None)
+        if user_message.lower() in ['exit', 'quit', 'keluar']:
+            break
+            
+        if not user_message:
+            continue
+
+        success = await chat.send_message(user_message)
         
-        if ds_session_before and ds_session_after:
-            if ds_session_before['value'] == ds_session_after['value']:
-                print(f"✅ Session ID unchanged: {ds_session_before['value'][:10]}...")
+        if success:
+            # Tunggu respon AI
+            await chat.wait_for_response()
+            
+            # Ambil hasil output
+            response_text = await chat.get_latest_response()
+            if response_text:
+                print("\n🤖 AI:")
+                print("-" * 30)
+                print(response_text)
+                print("-" * 30)
             else:
-                print(f"🔄 Session ID changed: {ds_session_before['value'][:10]}... -> {ds_session_after['value'][:10]}...")
+                print("⚠️  Gagal mengambil teks respon.")
         else:
-            print("⚠️ Could not verify session ID change")
-    print("Setelah login selesai, tekan Enter di terminal ini untuk menyimpan session dan menutup browser...")
-    
-    # Tunggu input user
-    input()
-    
-    # Simpan session setelah login manual
-    await app.close(save_before_close=False)
+            print("❌ Gagal mengirim pesan.")
+
+    # --- CHAT INTERACTION END ---
+
+    print("\nMenyimpan session dan menutup browser...")
+    await app.close(save_before_close=True)
 
 if __name__ == "__main__":
     asyncio.run(main())

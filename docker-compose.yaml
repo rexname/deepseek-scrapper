@@ -5,8 +5,8 @@ services:
       - 3000:3000
     environment:
       MAX_CONCURRENT_SESSIONS: 10
-      CONNECTION_TIMEOUT: 300000
-      TIMEOUT: 300000
+      CONNECTION_TIMEOUT: -1
+      TIMEOUT: -1
       KEEP_ALIVE: "true"
       DATA_DIR: /user_data
     volumes:
