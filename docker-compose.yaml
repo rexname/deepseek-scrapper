@@ -4,8 +4,13 @@ services:
     ports:
       - 3000:3000
     environment:
-      MAX_CONCURRENT_SESSIONS: 5
-      CONNECTION_TIMEOUT: 60000
+      MAX_CONCURRENT_SESSIONS: 10
+      CONNECTION_TIMEOUT: 300000
+      TIMEOUT: 300000
+      KEEP_ALIVE: "true"
+      DATA_DIR: /user_data
+    volumes:
+      - ./.user_data:/user_data
     networks:
       - scraper
 

@@ -12,6 +12,9 @@ if _cookies_path and os.path.exists(_cookies_path):
 
 CONFIG = {
     "base_url": os.getenv("base_url"),
+    "browserless_url": os.getenv("browserless_url", "ws://localhost:3000"),
     "cookies": _cookies,
     "ua": os.getenv("ua"),
+    "user": os.getenv("user"),
+    "password": os.getenv("password"),
 }
