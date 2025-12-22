@@ -1,4 +1,7 @@
 import asyncio
+import os
+import base64
+import uuid
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -11,6 +14,8 @@ from contextlib import asynccontextmanager
 class ChatRequest(BaseModel):
     message: str = Field(..., example="Halo, siapa namamu?")
     session_id: str = Field("default-session", example="user-123")
+    image_path: Optional[str] = Field(None, example="/path/to/image.jpg")
+    image_base64: Optional[str] = Field(None, description="Base64 encoded image string")
 
 class ChatResponse(BaseModel):
     status: str
@@ -102,27 +107,67 @@ async def chat_endpoint(request: ChatRequest):
     if not state.chat_handler:
         raise HTTPException(status_code=500, detail="Browser tidak terhubung")
 
+    temp_file_path = None
     try:
         state.is_busy = True
         
-        # 1. Kirim pesan
-        success = await state.chat_handler.send_message(request.message)
+        # Handle Base64 Image
+        final_image_path = request.image_path
+        if request.image_base64:
+            try:
+                # Decode base64
+                image_data = base64.b64decode(request.image_base64)
+                # Buat temporary file
+                filename = f"temp_upload_{uuid.uuid4()}.jpg"
+                temp_file_path = os.path.join("/tmp", filename)
+                
+                with open(temp_file_path, "wb") as f:
+                    f.write(image_data)
+                
+                final_image_path = temp_file_path
+                print(f"🖼️ Base64 image decoded to {temp_file_path}")
+            except Exception as e:
+                print(f"❌ Failed to process base64 image: {e}")
+                state.is_busy = False
+                return ChatResponse(status="error", error=f"Invalid base64 image: {str(e)}")
+
+        # 1. Navigasi ke chat lama jika ada chat_id (fitur baru yang didukung)
+        # Catatan: Perlu dipastikan ChatRequest memiliki field chat_id
+        chat_id = getattr(request, 'chat_id', None)
+        if chat_id:
+            target_url = f"https://chat.deepseek.com/a/chat/s/{chat_id}"
+            if state.chat_handler.page.url != target_url:
+                await state.chat_handler.page.goto(target_url, wait_until="domcontentloaded")
+                await asyncio.sleep(2) # Tunggu loading chat history
+        
+        # 2. Kirim pesan (dengan opsional image_path)
+        success = await state.chat_handler.send_message(request.message, image_path=final_image_path)
         if not success:
             state.is_busy = False
             return ChatResponse(status="error", error="Gagal mengirim pesan ke UI")
 
-        # 2. Tunggu respon
+        # 3. Tunggu dan ambil respon
         await state.chat_handler.wait_for_response()
-        
-        # 3. Ambil hasil
         ai_response = await state.chat_handler.get_latest_response()
         
+        # 4. Ambil chat_id saat ini dari URL (untuk dikembalikan ke user)
+        current_url = state.chat_handler.page.url
+        new_chat_id = current_url.split('/')[-1] if '/a/chat/s/' in current_url else None
+        
         state.is_busy = False
-        return ChatResponse(status="success", response=ai_response)
+        return ChatResponse(status="success", response=ai_response, chat_id=new_chat_id)
 
     except Exception as e:
         state.is_busy = False
         return ChatResponse(status="error", error=str(e))
+    finally:
+        # Cleanup temp file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                print(f"Clarified: 🧹 Removed temp file: {temp_file_path}")
+            except Exception as cleanup_err:
+                print(f"⚠️ Failed to remove temp file: {cleanup_err}")
 
 if __name__ == "__main__":
     import uvicorn
