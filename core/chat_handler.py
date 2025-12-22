@@ -8,6 +8,7 @@ class DeepSeekChatHandler:
         # Selectors based on DeepSeek UI structure
         self.selectors = {
             "input_area": "textarea#chat-input",
+            "file_input": "input[type='file']",
             "send_button": "button[title='Send Message'], .ds-icon-send, button:has(svg)",
             "message_list": ".ds-markdown.ds-markdown--block",
             "is_generating": ".ds-stop-button, .ds-icon-stop, button:has(.ds-icon-stop)",
@@ -26,10 +27,10 @@ class DeepSeekChatHandler:
         self.xpath_input_initial = "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[1]/textarea[1]"
         self.xpath_input_active = "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[2]/div[1]/div[2]/div[2]/div[2]/div[1]/div[1]/div[1]/textarea[1]"
 
-    async def send_message(self, message: str, timeout: int = 30000):
-        """Mengirim pesan ke chat"""
+    async def send_message(self, message: str, image_path: str = None, timeout: int = 30000):
+        """Mengirim pesan ke chat, opsional dengan gambar"""
         try:
-            # 1. Coba cari input area dengan berbagai strategi
+            # 1. Tentukan input area yang akan digunakan (Gunakan selector default karena teks diisi pertama)
             input_selectors = [
                 self.xpath_input_active,
                 self.xpath_input_initial,
@@ -53,33 +54,85 @@ class DeepSeekChatHandler:
                 print("❌ Gagal menemukan input area dengan selector manapun.")
                 return False
 
-            # 2. Fokus dan isi pesan
+            # 2. Fokus dan isi pesan TERLEBIH DAHULU
+            print(f"✍️  Mengisi pesan: {message[:50]}...")
             await self.page.focus(target_selector)
-            await self.page.fill(target_selector, message)
-            await asyncio.sleep(0.5) 
-            
-            # 3. Klik tombol kirim dengan berbagai strategi
+            # Menggunakan type untuk simulasi ketikan manusia agar UI mendeteksi perubahan state
+            await self.page.type(target_selector, message, delay=50)
+            await asyncio.sleep(1) 
+
+            # 3. Upload gambar jika ada (SETELAH teks diisi)
+            if image_path:
+                try:
+                    # Pastikan file ada
+                    import os
+                    if os.path.exists(image_path):
+                        print(f"🖼️  Mengupload gambar: {image_path}")
+                        # DeepSeek biasanya menggunakan input file tersembunyi
+                        file_input = await self.page.query_selector(self.selectors["file_input"])
+                        if file_input:
+                            await file_input.set_input_files(image_path)
+                            
+                            # User provided specific XPath for upload success/preview
+                            upload_success_xpath = "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[1]/div[2]/div[2]/div[1]/div[2]/div[2]/div[1]/div[1]"
+                            try:
+                                # Tunggu indikator upload muncul
+                                await self.page.wait_for_selector(upload_success_xpath, state="visible", timeout=10000)
+                                print("✅ Gambar berhasil diupload (indikator muncul)")
+                            except Exception:
+                                print("⚠️ Indikator upload tidak muncul dalam 10 detik, melanjutkan...")
+                                await asyncio.sleep(2) 
+                        else:
+                            print("⚠️  Input file tidak ditemukan.")
+                    else:
+                        print(f"⚠️  File gambar tidak ditemukan: {image_path}")
+                except Exception as upload_err:
+                    print(f"⚠️  Gagal upload gambar: {upload_err}")
+
+            # 4. Klik tombol kirim dengan berbagai strategi
+            # Tunggu tombol kirim aktif jika ada upload gambar
+            if image_path:
+                await asyncio.sleep(2)
+
             send_selectors = [
+                "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[1]/div[2]/div[2]/div[1]/div[3]/div[2]/div[3]/div[2]/div[1]/div[1]",
                 self.selectors["send_button"],
                 "xpath=//div[@role='button' and @aria-label='Send message']",
                 "button[title='Send Message']",
                 ".ds-icon-send",
-                "button:has(svg)"
+                "button:has(svg)",
+                "xpath=//button[contains(@class, 'ds-icon-send')]"
             ]
             
-            sent = False
+            # Tunggu salah satu tombol kirim muncul dan aktif
+            print("⏳ Menunggu tombol kirim aktif...")
+            target_send_selector = None
             for selector in send_selectors:
-                button = await self.page.query_selector(selector)
-                if button and await button.is_enabled():
-                    await button.click()
-                    sent = True
-                    break
+                try:
+                    await self.page.wait_for_selector(selector, state="visible", timeout=3000)
+                    button = await self.page.query_selector(selector)
+                    if button and await button.is_enabled():
+                        target_send_selector = selector
+                        break
+                except:
+                    continue
+
+            sent = False
+            if target_send_selector:
+                button = await self.page.query_selector(target_send_selector)
+                await button.scroll_into_view_if_needed()
+                await button.click()
+                sent = True
             
             if not sent:
-                # Fallback ke Enter
+                # Fallback ke Enter jika tombol tidak ditemukan atau tidak aktif
+                print("⚠️  Tombol kirim tidak aktif, mencoba menekan Enter...")
+                # Pastikan area input masih fokus sebelum menekan Enter
+                await self.page.focus(target_selector)
                 await self.page.press(target_selector, "Enter")
+                sent = True 
                 
-            print(f"✉️  Pesan dikirim: {message[:50]}...")
+            print(f"✉️  Pesan dikirim.")
             return True
         except Exception as e:
             print(f"❌ Gagal mengirim pesan: {e}")
