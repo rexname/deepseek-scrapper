@@ -10,6 +10,52 @@ from core.models import Session as SessionModel, Chat as ChatModel, Message as M
 from core.data_manager import DataManager
 from sqlalchemy.future import select
 import uuid
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+from typing import Optional
+
+# --- API Models & State ---
+class ChatRequest(BaseModel):
+    message: str = Field(..., example="Halo, siapa namamu?")
+    image_path: Optional[str] = Field(None, example="/path/to/image.jpg")
+
+class APIState:
+    session_manager: Optional[BrowserlessSessionManager] = None
+    chat_handler: Optional[DeepSeekChatHandler] = None
+
+api_state = APIState()
+api_app = FastAPI(title="DeepSeek Scrapper API")
+
+@api_app.post("/chat")
+async def chat_endpoint(request: ChatRequest):
+    if not api_state.chat_handler:
+        raise HTTPException(status_code=503, detail="Chat handler not initialized")
+    
+    chat_uuid = str(uuid.uuid4())
+    session_id = api_state.session_manager.session_id
+    
+    async for db in get_db():
+        dm = DataManager(db)
+        await dm.save_chat_message(session_id, chat_uuid, "user", request.message)
+        
+        success = await api_state.chat_handler.send_message(request.message, image_path=request.image_path)
+        if success:
+            current_url = api_state.chat_handler.page.url
+            if "/a/chat/s/" in current_url:
+                real_chat_id = current_url.split("/a/chat/s/")[-1].split("?")[0].split("#")[0]
+                await dm.update_chat_id(chat_uuid, real_chat_id)
+                chat_uuid = real_chat_id
+
+            await api_state.chat_handler.wait_for_response()
+            response_text = await api_state.chat_handler.get_latest_response()
+            
+            if response_text:
+                await dm.save_chat_message(session_id, chat_uuid, "assistant", response_text)
+                return {"status": "success", "chat_id": chat_uuid, "response": response_text}
+            
+            raise HTTPException(status_code=500, detail="Failed to get AI response")
+        
+        raise HTTPException(status_code=500, detail="Failed to send message")
 
 async def run_chat_mode(chat_handler: DeepSeekChatHandler, session_id: str):
     print("\n💬 Mode Chat Aktif. Ketik 'exit' untuk keluar.")
@@ -225,17 +271,13 @@ async def main():
     if args.mode == "chat":
         await run_chat_mode(chat_handler, app.session_id)
     elif args.mode == "api":
-        # Import API app secara dynamic
-        from api_main import app as fastapi_app, state
-        
-        # JANGAN inisialisasi ulang di api_main.lifespan
-        # Cukup gunakan instance yang sudah ada dari main.py
-        state.session_manager = app
-        state.chat_handler = chat_handler
+        # Inject state untuk API
+        api_state.session_manager = app
+        api_state.chat_handler = chat_handler
         
         print(f"🚀 Starting API server on port {args.port}...")
         config_uvicorn = uvicorn.Config(
-            fastapi_app, 
+            api_app, 
             host="0.0.0.0", 
             port=args.port, 
             log_level="info",
