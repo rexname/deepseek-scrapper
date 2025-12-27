@@ -4,3 +4,4 @@ __pycache__/
 *sessions/
 .user_data/
 roadmap/
+temp*
