@@ -2,6 +2,8 @@ import asyncio
 import argparse
 import sys
 import uvicorn
+import os
+import base64
 from core.session_manager import BrowserlessSessionManager
 from core.chat_handler import DeepSeekChatHandler
 from core import config
@@ -16,8 +18,9 @@ from typing import Optional
 
 # --- API Models & State ---
 class ChatRequest(BaseModel):
-    message: str = Field(..., example="Halo, siapa namamu?")
-    image_path: Optional[str] = Field(None, example="/path/to/image.jpg")
+    message: str = Field(..., json_schema_extra={"example": "Halo, siapa namamu?"})
+    image_path: Optional[str] = Field(None, json_schema_extra={"example": "/path/to/image.jpg"})
+    image_base64: Optional[str] = Field(None, json_schema_extra={"description": "Base64 encoded image string"})
 
 class APIState:
     session_manager: Optional[BrowserlessSessionManager] = None
@@ -34,28 +37,51 @@ async def chat_endpoint(request: ChatRequest):
     chat_uuid = str(uuid.uuid4())
     session_id = api_state.session_manager.session_id
     
+    # Handle image_base64
+    temp_image_path = None
+    if request.image_base64:
+        try:
+            # Create temp directory if not exists
+            os.makedirs("temp_uploads", exist_ok=True)
+            temp_image_path = f"temp_uploads/{uuid.uuid4()}.png"
+            
+            # Decode base64
+            header, data = request.image_base64.split(",") if "," in request.image_base64 else (None, request.image_base64)
+            with open(temp_image_path, "wb") as f:
+                f.write(base64.b64decode(data))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {e}")
+
+    # Use image_path if provided, otherwise use temp_image_path from base64
+    final_image_path = request.image_path or temp_image_path
+
     async for db in get_db():
         dm = DataManager(db)
         await dm.save_chat_message(session_id, chat_uuid, "user", request.message)
         
-        success = await api_state.chat_handler.send_message(request.message, image_path=request.image_path)
-        if success:
-            current_url = api_state.chat_handler.page.url
-            if "/a/chat/s/" in current_url:
-                real_chat_id = current_url.split("/a/chat/s/")[-1].split("?")[0].split("#")[0]
-                await dm.update_chat_id(chat_uuid, real_chat_id)
-                chat_uuid = real_chat_id
+        try:
+            success = await api_state.chat_handler.send_message(request.message, image_path=final_image_path)
+            if success:
+                current_url = api_state.chat_handler.page.url
+                if "/a/chat/s/" in current_url:
+                    real_chat_id = current_url.split("/a/chat/s/")[-1].split("?")[0].split("#")[0]
+                    await dm.update_chat_id(chat_uuid, real_chat_id)
+                    chat_uuid = real_chat_id
 
-            await api_state.chat_handler.wait_for_response()
-            response_text = await api_state.chat_handler.get_latest_response()
+                await api_state.chat_handler.wait_for_response()
+                response_text = await api_state.chat_handler.get_latest_response()
+                
+                if response_text:
+                    await dm.save_chat_message(session_id, chat_uuid, "assistant", response_text)
+                    return {"status": "success", "chat_id": chat_uuid, "response": response_text}
+                
+                raise HTTPException(status_code=500, detail="Failed to get AI response")
             
-            if response_text:
-                await dm.save_chat_message(session_id, chat_uuid, "assistant", response_text)
-                return {"status": "success", "chat_id": chat_uuid, "response": response_text}
-            
-            raise HTTPException(status_code=500, detail="Failed to get AI response")
-        
-        raise HTTPException(status_code=500, detail="Failed to send message")
+            raise HTTPException(status_code=500, detail="Failed to send message")
+        finally:
+            # Cleanup temp file
+            if temp_image_path and os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
 
 async def run_chat_mode(chat_handler: DeepSeekChatHandler, session_id: str):
     print("\n💬 Mode Chat Aktif. Ketik 'exit' untuk keluar.")
