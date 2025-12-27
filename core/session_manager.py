@@ -64,7 +64,9 @@ class BrowserlessSessionManager:
                 params.append(f"token={self.api_token}")
             
             # Browserless standard endpoint untuk CDP
-            connect_url = f"{self.browserless_url}/chromium?{'&'.join(params)}"
+            # Jika menggunakan self-hosted/Docker, biasanya langsung ke root /
+            # Gunakan localhost untuk koneksi lokal, tapi pastikan service jalan
+            connect_url = f"{self.browserless_url}/?{'&'.join(params)}"
             
             print(f"🔗 Connecting to Browserless: {self.browserless_url}")
             print(f"   Session ID: {self.session_id}")

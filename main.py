@@ -128,7 +128,15 @@ async def main():
     # --- CHAT INTERACTION END ---
 
     print("\nMenyimpan session dan menutup browser...")
-    await app.close(save_before_close=True)
+    try:
+        await app.close(save_before_close=True)
+    except Exception as e:
+        print(f"⚠️ Error saat menutup browser: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Keluar atas permintaan user...")
+    except Exception as e:
+        print(f"❌ Error fatal: {e}")
