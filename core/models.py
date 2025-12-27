@@ -4,15 +4,28 @@ from datetime import datetime
 from .database import Base
 import uuid
 
+class Account(Base):
+    __tablename__ = "accounts"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    email = Column(String, unique=True, index=True)
+    password = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    sessions = relationship("Session", back_populates="account", cascade="all, delete-orphan")
+
 class Session(Base):
     __tablename__ = "sessions"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     session_id = Column(String, unique=True, index=True) # ID session untuk Browserless
+    account_email = Column(ForeignKey("accounts.email"), nullable=True)
     site_name = Column(String, default="deepseek")
+    storage_state = Column(JSON, nullable=True) # JSON Playwright storage state
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    account = relationship("Account", back_populates="sessions")
     chats = relationship("Chat", back_populates="session", cascade="all, delete-orphan")
 
 class Chat(Base):

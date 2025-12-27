@@ -1,13 +1,18 @@
 import asyncio
 from core.database import engine, Base
-from core.models import Session, Chat, Message
+from core.models import Account, Session, Chat, Message
 
-async def init_db():
+async def init_db(reset=False):
     async with engine.begin() as conn:
-        print("🚀 Initializing database tables...")
-        # await conn.run_sync(Base.metadata.drop_all) # Gunakan ini jika ingin reset
+        if reset:
+            print("⚠️ Resetting database (dropping all tables)...")
+            await conn.run_sync(Base.metadata.drop_all)
+        
+        print("🚀 Syncing database tables...")
         await conn.run_sync(Base.metadata.create_all)
-        print("✅ Database tables created successfully.")
+        print("✅ Database tables synced successfully.")
 
 if __name__ == "__main__":
-    asyncio.run(init_db())
+    import sys
+    reset_db = "--reset" in sys.argv
+    asyncio.run(init_db(reset=reset_db))

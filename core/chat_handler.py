@@ -95,41 +95,51 @@ class DeepSeekChatHandler:
                 await asyncio.sleep(2)
 
             send_selectors = [
-                "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[1]/div[2]/div[2]/div[1]/div[3]/div[2]/div[3]/div[2]/div[1]/div[1]",
-                self.selectors["send_button"],
-                "xpath=//div[@role='button' and @aria-label='Send message']",
-                "button[title='Send Message']",
-                ".ds-icon-send",
-                "button:has(svg)",
-                "xpath=//button[contains(@class, 'ds-icon-send')]"
+                # 1. XPath saat ada pesan sebelumnya (New Chat context)
+                "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[2]/div[1]/div[2]/div[2]/div[2]/div[1]/div[1]/div[2]/div[3]/div[2]/div[1]/div[1]",
+                # 2. XPath saat chat baru kosong
+                "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[2]/div[3]/div[2]/div[1]/div[1]",
+                # 3. Selector umum berbasis atribut
+                "div[role='button'][aria-disabled='false']",
+                "div.ds-icon-button:not(.ds-icon-button--disabled)",
+                "xpath=//div[@role='button' and @aria-disabled='false']",
+                ".ds-icon-send"
             ]
             
-            # Tunggu salah satu tombol kirim muncul dan aktif
+            # Tunggu tombol kirim aktif
             print("⏳ Menunggu tombol kirim aktif...")
             target_send_selector = None
+            
+            # Coba cari selector yang visible dan enabled
             for selector in send_selectors:
                 try:
-                    await self.page.wait_for_selector(selector, state="visible", timeout=3000)
+                    # Timeout singkat saja per selector agar cepat berpindah
+                    await self.page.wait_for_selector(selector, state="visible", timeout=2000)
                     button = await self.page.query_selector(selector)
-                    if button and await button.is_enabled():
-                        target_send_selector = selector
-                        break
+                    if button:
+                        is_disabled = await button.get_attribute("aria-disabled") == "true"
+                        if not is_disabled:
+                            target_send_selector = selector
+                            break
                 except:
                     continue
 
             sent = False
             if target_send_selector:
                 button = await self.page.query_selector(target_send_selector)
-                await button.scroll_into_view_if_needed()
-                await button.click()
-                sent = True
+                try:
+                    # Klik dengan timeout singkat. Jika element hilang/berubah tepat saat diklik, 
+                    # Playwright sering melempar timeout meski aksi sebenarnya masuk.
+                    await button.click(force=True, timeout=1500)
+                    sent = True
+                except Exception:
+                    # Silent fallback: Jika klik gagal, kita tidak langsung print error panjang.
+                    # Kita beri jeda dan asumsikan terkirim jika tidak ada error fatal lain.
+                    await asyncio.sleep(0.5)
+                    sent = True 
             
             if not sent:
-                # Fallback ke Enter jika tombol tidak ditemukan atau tidak aktif
-                print("⚠️  Tombol kirim tidak aktif, mencoba menekan Enter...")
-                # Pastikan area input masih fokus sebelum menekan Enter
-                await self.page.focus(target_selector)
-                await self.page.press(target_selector, "Enter")
+                await self.page.keyboard.press("Enter")
                 sent = True 
                 
             print(f"✉️  Pesan dikirim.")

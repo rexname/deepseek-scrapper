@@ -8,6 +8,10 @@ from typing import Optional, List
 from core.session_manager import BrowserlessSessionManager
 from core.chat_handler import DeepSeekChatHandler
 from core import config
+from core.database import get_db
+from core.models import Session as SessionModel, Chat as ChatModel, Message as MessageModel
+from core.data_manager import DataManager
+from sqlalchemy.future import select
 from contextlib import asynccontextmanager
 
 # --- Models ---
@@ -34,55 +38,55 @@ state = GlobalState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Initialize browser connection
-    state.session_manager = BrowserlessSessionManager(
-        browserless_url=config.CONFIG["browserless_url"],
-        site_name="deepseek",
-        session_id="deepseek-persistent-session" # Harus sama dengan main.py
-    )
-    
-    connected = await state.session_manager.connect_browserless()
-    if not connected:
-        print("❌ Failed to connect to Browserless on startup")
-    else:
-        page = await state.session_manager.new_page()
-        url = "https://chat.deepseek.com"
+    # Jika diluncurkan dari main.py, session_manager dan chat_handler sudah di-inject
+    # Jika dijalankan langsung (standalone), baru lakukan inisialisasi
+    if not state.session_manager:
+        print("🔧 Initializing standalone API session...")
+        state.session_manager = BrowserlessSessionManager(
+            browserless_url=config.CONFIG["browserless_url"],
+            site_name="deepseek",
+            session_id="deepseek-persistent-session"
+        )
         
-        # Load session jika ada storage state (sinkronisasi lokal)
-        if state.session_manager.storage_file.exists():
-            await state.session_manager.load_session()
+        connected = await state.session_manager.connect_browserless()
+        if not connected:
+            print("❌ Failed to connect to Browserless on startup")
+        else:
+            page = await state.session_manager.new_page()
+            url = "https://chat.deepseek.com"
             
-        await page.goto(url, wait_until="domcontentloaded")
-        
-        # Cek apakah user sudah login (Logika yang sama dengan main.py)
-        # Gunakan XPath textarea sebagai indikator login
-        login_indicator = "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[1]/textarea[1]"
-        
-        try:
-            await page.wait_for_selector(login_indicator, state="visible", timeout=10000)
-            print("✅ Session API sudah aktif (Logged in).")
-        except:
-            print("🔐 API Session expired/not found, melakukan login otomatis...")
-            try:
-                # Login logic dari main.py
-                await page.type("input.ds-input__input", config.CONFIG["user"])
-                await page.type("input[type='password']", config.CONFIG["password"])  
-                await page.click('"Log in"')
+            if state.session_manager.storage_file.exists():
+                await state.session_manager.load_session()
                 
-                # Tunggu login sukses
-                await page.wait_for_selector(login_indicator, state="visible", timeout=15000)
-                print("✅ Login otomatis API berhasil.")
-                await state.session_manager.save_session()
-            except Exception as e:
-                print(f"❌ Login otomatis API gagal: {e}")
+            await page.goto(url, wait_until="domcontentloaded")
+            
+            login_indicator = "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[1]/textarea[1]"
+            
+            try:
+                await page.wait_for_selector(login_indicator, state="visible", timeout=10000)
+                print("✅ Session API sudah aktif.")
+            except:
+                print("🔐 API Session expired, melakukan login otomatis...")
+                try:
+                    await page.type("input.ds-input__input", config.CONFIG["user"])
+                    await page.type("input[type='password']", config.CONFIG["password"])  
+                    await page.click('"Log in"')
+                    await page.wait_for_selector(login_indicator, state="visible", timeout=15000)
+                    print("✅ Login otomatis API berhasil.")
+                    await state.session_manager.save_session()
+                except Exception as e:
+                    print(f"❌ Login otomatis API gagal: {e}")
 
-        state.chat_handler = DeepSeekChatHandler(page)
-        print("🚀 API ready and browser connected with persistent session")
+            state.chat_handler = DeepSeekChatHandler(page)
+            print("🚀 API ready (standalone mode)")
+    else:
+        print("🚀 API ready (injected mode from main.py)")
         
     yield
     
-    # Shutdown: Clean up
-    if state.session_manager:
+    # Shutdown: Clean up hanya jika standalone
+    # Jika dari main.py, biar main.py yang handle closing
+    if state.session_manager and not sys.modules.get('main'):
         await state.session_manager.close()
 
 app = FastAPI(
@@ -96,78 +100,42 @@ app = FastAPI(
 async def root():
     return {"message": "DeepSeek Scrapper API is running", "docs": "/docs"}
 
-@app.post("/chat", response_model=ChatResponse, tags=["Chat"])
+@app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
-    """
-    Mengirim pesan ke DeepSeek dan mengambil responnya.
-    """
-    if state.is_busy:
-        raise HTTPException(status_code=503, detail="AI sedang sibuk memproses permintaan lain")
-    
     if not state.chat_handler:
-        raise HTTPException(status_code=500, detail="Browser tidak terhubung")
-
-    temp_file_path = None
-    try:
-        state.is_busy = True
+        raise HTTPException(status_code=503, detail="Chat handler not initialized")
+    
+    chat_uuid = str(uuid.uuid4())
+    session_id = state.session_manager.session_id
+    
+    async for db in get_db():
+        dm = DataManager(db)
         
-        # Handle Base64 Image
-        final_image_path = request.image_path
-        if request.image_base64:
-            try:
-                # Decode base64
-                image_data = base64.b64decode(request.image_base64)
-                # Buat temporary file
-                filename = f"temp_upload_{uuid.uuid4()}.jpg"
-                temp_file_path = os.path.join("/tmp", filename)
-                
-                with open(temp_file_path, "wb") as f:
-                    f.write(image_data)
-                
-                final_image_path = temp_file_path
-                print(f"🖼️ Base64 image decoded to {temp_file_path}")
-            except Exception as e:
-                print(f"❌ Failed to process base64 image: {e}")
-                state.is_busy = False
-                return ChatResponse(status="error", error=f"Invalid base64 image: {str(e)}")
-
-        # 1. Navigasi ke chat lama jika ada chat_id (fitur baru yang didukung)
-        # Catatan: Perlu dipastikan ChatRequest memiliki field chat_id
-        chat_id = getattr(request, 'chat_id', None)
-        if chat_id:
-            target_url = f"https://chat.deepseek.com/a/chat/s/{chat_id}"
-            if state.chat_handler.page.url != target_url:
-                await state.chat_handler.page.goto(target_url, wait_until="domcontentloaded")
-                await asyncio.sleep(2) # Tunggu loading chat history
+        # 1. Simpan pesan User
+        await dm.save_chat_message(session_id, chat_uuid, "user", request.message)
         
-        # 2. Kirim pesan (dengan opsional image_path)
-        success = await state.chat_handler.send_message(request.message, image_path=final_image_path)
-        if not success:
-            state.is_busy = False
-            return ChatResponse(status="error", error="Gagal mengirim pesan ke UI")
-
-        # 3. Tunggu dan ambil respon
-        await state.chat_handler.wait_for_response()
-        ai_response = await state.chat_handler.get_latest_response()
+        # 2. Kirim pesan ke Browser
+        success = await state.chat_handler.send_message(request.message, image_path=request.image_path)
         
-        # 4. Ambil chat_id saat ini dari URL (untuk dikembalikan ke user)
-        current_url = state.chat_handler.page.url
-        new_chat_id = current_url.split('/')[-1] if '/a/chat/s/' in current_url else None
-        
-        state.is_busy = False
-        return ChatResponse(status="success", response=ai_response, chat_id=new_chat_id)
+        if success:
+            # 3. Sinkronisasi Chat ID dari URL
+            current_url = state.chat_handler.page.url
+            if "/a/chat/s/" in current_url:
+                real_chat_id = current_url.split("/")[-1]
+                await dm.update_chat_id(chat_uuid, real_chat_id)
+                chat_uuid = real_chat_id
 
-    except Exception as e:
-        state.is_busy = False
-        return ChatResponse(status="error", error=str(e))
-    finally:
-        # Cleanup temp file
-        if temp_file_path and os.path.exists(temp_file_path):
-            try:
-                os.remove(temp_file_path)
-                print(f"Clarified: 🧹 Removed temp file: {temp_file_path}")
-            except Exception as cleanup_err:
-                print(f"⚠️ Failed to remove temp file: {cleanup_err}")
+            await state.chat_handler.wait_for_response()
+            response_text = await state.chat_handler.get_latest_response()
+            
+            if response_text:
+                # 4. Simpan respon AI
+                await dm.save_chat_message(session_id, chat_uuid, "assistant", response_text)
+                return {"status": "success", "chat_id": chat_uuid, "response": response_text}
+            
+            raise HTTPException(status_code=500, detail="Failed to get AI response")
+            
+        raise HTTPException(status_code=500, detail="Failed to send message")
 
 if __name__ == "__main__":
     import uvicorn
