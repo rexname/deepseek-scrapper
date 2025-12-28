@@ -69,6 +69,7 @@ async def chat_endpoint(request: ChatRequest):
     # Use image_path if provided, otherwise use temp_image_path from base64
     final_image_path = request.image_path or temp_image_path
 
+    user_email = config.CONFIG.get("user")
     async for db in get_db():
         dm = DataManager(db)
         
@@ -85,7 +86,7 @@ async def chat_endpoint(request: ChatRequest):
                     print(f"🔗 Mengarahkan API ke link chat: {chat_url}")
                     await api_state.chat_handler.page.goto(chat_url, wait_until="networkidle")
 
-        await dm.save_chat_message(session_id, chat_uuid, "user", request.message)
+        await dm.save_chat_message(session_id, chat_uuid, "user", request.message, account_email=user_email)
         
         try:
             success = await api_state.chat_handler.send_message(request.message, image_path=final_image_path)
@@ -105,7 +106,7 @@ async def chat_endpoint(request: ChatRequest):
                     await dm.update_chat_title(chat_uuid, chat_title)
                 
                 if response_text:
-                    await dm.save_chat_message(session_id, chat_uuid, "assistant", response_text)
+                    await dm.save_chat_message(session_id, chat_uuid, "assistant", response_text, account_email=user_email)
                     return {"status": "success", "chat_id": chat_uuid, "response": response_text}
                 
                 raise HTTPException(status_code=500, detail="Failed to get AI response")
@@ -121,10 +122,11 @@ async def list_chats_endpoint():
     if not api_state.session_manager:
         raise HTTPException(status_code=503, detail="Session manager not initialized")
     
-    session_id = api_state.session_manager.session_id
+    user_email = config.CONFIG.get("user")
     async for db in get_db():
         dm = DataManager(db)
-        chats = await dm.get_chats(session_id)
+        # Ambil chat berdasarkan email akun agar lebih stabil saat rotasi session
+        chats = await dm.get_chats(account_email=user_email)
         return [
             {
                 "id": chat.id,
@@ -200,7 +202,8 @@ async def run_chat_mode(chat_handler: DeepSeekChatHandler, session_id: str):
                     await chat_handler.page.goto(expected_url, wait_until="networkidle")
 
             # 4. Simpan & Kirim Pesan
-            await dm.save_chat_message(session_id, chat_uuid, "user", user_message)
+            user_email = config.CONFIG.get("user")
+            await dm.save_chat_message(session_id, chat_uuid, "user", user_message, account_email=user_email)
             success = await chat_handler.send_message(user_message)
             
             if success:
@@ -232,7 +235,7 @@ async def run_chat_mode(chat_handler: DeepSeekChatHandler, session_id: str):
                 if response_text:
                     print(f"\n🤖 AI:\n{'-'*30}\n{response_text}\n{'-'*30}")
                     # 4. Simpan pesan AI ke DB
-                    await dm.save_chat_message(session_id, chat_uuid, "assistant", response_text)
+                    await dm.save_chat_message(session_id, chat_uuid, "assistant", response_text, account_email=user_email)
                 else:
                     print("⚠️ Gagal mengambil teks respon.")
             else:
@@ -244,11 +247,16 @@ async def main():
     parser.add_argument("--port", type=int, default=8000, help="Port untuk mode API")
     args = parser.parse_args()
 
+    # Gunakan session ID yang spesifik untuk akun agar cookies tidak bercampur
+    user_email = config.CONFIG.get("user", "default")
+    safe_email = user_email.replace("@", "_").replace(".", "_")
+    session_id = f"deepseek-{safe_email}"
+
     app = BrowserlessSessionManager(
         browserless_url=config.CONFIG["browserless_url"],
         site_name="deepseek",
         session_dir="deepseek_sessions",
-        session_id="deepseek-persistent-session"
+        session_id=session_id
     )
     
     # Ambil session dari DB jika ada

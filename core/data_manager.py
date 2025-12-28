@@ -49,30 +49,37 @@ class DataManager:
         db_session = result.scalar_one_or_none()
         return db_session.storage_state if db_session else None
 
-    async def save_chat_message(self, session_id: str, chat_id: str, role: str, content: str, image_url: str = None):
+    async def save_chat_message(self, session_id: str, chat_id: str, role: str, content: str, image_url: str = None, account_email: str = None):
         """Simpan pesan chat ke DB"""
         # Pastikan session ada
         stmt_sess = select(Session).where(Session.session_id == session_id)
         res_sess = await self.db.execute(stmt_sess)
-        if not res_sess.scalar_one_or_none():
+        db_sess = res_sess.scalar_one_or_none()
+        
+        if not db_sess:
             # Jika session belum ada di DB (misal baru mulai), buat dulu
-            new_sess = Session(session_id=session_id)
-            self.db.add(new_sess)
+            db_sess = Session(session_id=session_id, account_email=account_email)
+            self.db.add(db_sess)
+            await self.db.flush()
+        elif account_email and not db_sess.account_email:
+            # Update email jika belum ada
+            db_sess.account_email = account_email
             await self.db.flush()
 
+        # Ambil email dari session jika tidak disediakan langsung
+        final_email = account_email or db_sess.account_email
+
         # Pastikan chat record ada
-        # Cari berdasarkan chat_id (bisa UUID temp atau ID asli DeepSeek)
-        # Atau cari berdasarkan id (internal UUID) jika chat_id adalah UUID
         stmt_chat = select(Chat).where(or_(Chat.chat_id == chat_id, Chat.id == chat_id))
         res_chat = await self.db.execute(stmt_chat)
         db_chat = res_chat.scalar_one_or_none()
         
         if not db_chat:
-            # Jika tidak ada, buat baru. Gunakan chat_id sebagai chat_id.
-            # Jika chat_id terlihat seperti UUID, kita bisa set ke id juga jika mau, 
-            # tapi biarkan SQLAlchemy handle id otomatis.
-            db_chat = Chat(chat_id=chat_id, session_id=session_id)
+            db_chat = Chat(chat_id=chat_id, session_id=session_id, account_email=final_email)
             self.db.add(db_chat)
+            await self.db.flush()
+        elif final_email and not db_chat.account_email:
+            db_chat.account_email = final_email
             await self.db.flush()
 
         # Simpan pesan - SELALU gunakan db_chat.id (PK) sebagai foreign key
@@ -136,9 +143,15 @@ class DataManager:
             await self.db.commit()
             print(f"📝 Title updated for chat {chat_id}: {title}")
 
-    async def get_chats(self, session_id: str):
-        """Ambil daftar chat untuk session tertentu"""
-        stmt = select(Chat).where(Chat.session_id == session_id).order_by(Chat.created_at.desc())
+    async def get_chats(self, session_id: str = None, account_email: str = None):
+        """Ambil daftar chat untuk session atau account tertentu"""
+        stmt = select(Chat)
+        if session_id:
+            stmt = stmt.where(Chat.session_id == session_id)
+        if account_email:
+            stmt = stmt.where(Chat.account_email == account_email)
+            
+        stmt = stmt.order_by(Chat.created_at.desc())
         res = await self.db.execute(stmt)
         return res.scalars().all()
 

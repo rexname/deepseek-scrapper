@@ -13,6 +13,7 @@ class Account(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     sessions = relationship("Session", back_populates="account", cascade="all, delete-orphan")
+    chats_history = relationship("Chat", back_populates="account")
 
 class Session(Base):
     __tablename__ = "sessions"
@@ -34,10 +35,12 @@ class Chat(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     chat_id = Column(String, unique=True, index=True) # ID chat dari URL DeepSeek
     session_id = Column(ForeignKey("sessions.session_id"))
+    account_email = Column(ForeignKey("accounts.email"), nullable=True) # Pemilik chat
     title = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     session = relationship("Session", back_populates="chats")
+    account = relationship("Account", back_populates="chats_history") # Relationship ke account
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")
 
 class Message(Base):
