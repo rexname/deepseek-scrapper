@@ -17,6 +17,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
+from contextlib import asynccontextmanager
 
 # --- API Models & State ---
 class ChatRequest(BaseModel):
@@ -41,7 +42,151 @@ class APIState:
     chat_handler: Optional[DeepSeekChatHandler] = None
 
 api_state = APIState()
-api_app = FastAPI(title="DeepSeek Scrapper API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Setup for API mode
+    print("🚀 Initializing browser for API...")
+    app_manager, chat_handler = await initialize_deepseek()
+    if app_manager and chat_handler:
+        api_state.session_manager = app_manager
+        api_state.chat_handler = chat_handler
+        print("✅ API ready.")
+    else:
+        print("❌ API failed to initialize browser.")
+    
+    yield
+    
+    # Teardown
+    if api_state.session_manager:
+        await cleanup_deepseek(api_state.session_manager)
+
+api_app = FastAPI(title="DeepSeek Scrapper API", lifespan=lifespan)
+
+async def initialize_deepseek():
+    # Gunakan session ID yang spesifik untuk akun agar cookies tidak bercampur
+    user_email = config.CONFIG.get("user", "default")
+    safe_email = user_email.replace("@", "_").replace(".", "_")
+    session_id = f"deepseek-{safe_email}"
+
+    app = BrowserlessSessionManager(
+        browserless_url=config.CONFIG["browserless_url"],
+        site_name="deepseek",
+        session_dir="deepseek_sessions",
+        session_id=session_id
+    )
+    
+    # Ambil session dari DB jika ada
+    storage_state = None
+    async for db in get_db():
+        dm = DataManager(db)
+        storage_state = await dm.get_browser_session(app.session_id)
+
+    connected = await app.connect_browserless(storage_state=storage_state)
+    if not connected:
+        print("Exiting because Browserless connection failed.")
+        return None, None
+
+    page = await app.new_page()
+    if not page:
+        print("Exiting because page could not be created.")
+        await app.close(save_before_close=False)
+        return None, None
+        
+    url = "https://chat.deepseek.com"
+    await page.goto(url, wait_until="domcontentloaded")
+    
+    # Login check dengan deteksi network dan DOM terbaru
+    login_indicators = [
+        "textarea[placeholder*='Message DeepSeek']",
+        "div[class*='ede5bc47']",  # Avatar lingkaran (M)
+        "div[class*='_9d8da05']",  # Email display
+        "textarea#chat-input",
+        ".ds-avatar"
+    ]
+    
+    is_logged_in = False
+    
+    # 1. Cek apakah sudah login berdasarkan elemen yang ada
+    for indicator in login_indicators:
+        try:
+            await page.wait_for_selector(indicator, state="visible", timeout=1000)
+            is_logged_in = True
+            break
+        except:
+            continue
+
+    if is_logged_in:
+        print("✅ Session sudah aktif.")
+    else:
+        print("🔐 Session expired atau belum login, melakukan login otomatis...")
+        try:
+            # Pantau network untuk konfirmasi login sukses (200 OK pada endpoint login)
+            login_success = asyncio.Future()
+            
+            async def handle_response(response):
+                if "/api/v0/users/login" in response.url and response.status == 200:
+                    if not login_success.done():
+                        login_success.set_result(True)
+            
+            page.on("response", handle_response)
+
+            # Jika tidak di halaman login, cari tombol login
+            if "login" not in page.url.lower():
+                try:
+                    login_btn = await page.query_selector('text="Log in"')
+                    if login_btn:
+                        await login_btn.click()
+                        await page.wait_for_load_state("networkidle")
+                except:
+                    pass
+
+            # Isi form login sesuai HTML yang diberikan user
+            email_input = "input[type='text'].ds-input__input[placeholder*='Phone']"
+            await page.wait_for_selector(email_input, timeout=10000)
+            await page.fill(email_input, config.CONFIG["user"])
+            
+            pass_input = "input[type='password'].ds-input__input[placeholder='Password']"
+            await page.fill(pass_input, config.CONFIG["password"])
+            
+            submit_btn = "div.ds-sign-up-form__register-button[role='button']"
+            await page.click(submit_btn)
+
+            try:
+                await asyncio.wait_for(login_success, timeout=1000)
+                print("🌐 Network: Login success (200 OK)")
+            except:
+                await page.wait_for_selector("textarea[placeholder*='Message DeepSeek']", timeout=10000)
+            
+            print("✅ Login otomatis berhasil.")
+            page.remove_listener("response", handle_response)
+            
+        except Exception as e:
+            print(f"❌ Login otomatis gagal: {e}")
+            if "chat" in page.url:
+                print("⚠️  URL menunjukkan area chat, lanjut meskipun deteksi error.")
+            else:
+                await app.close(save_before_close=False)
+                return None, None
+
+    chat_handler = DeepSeekChatHandler(page)
+    return app, chat_handler
+
+async def cleanup_deepseek(app: BrowserlessSessionManager):
+    print("\nMenyimpan session dan menutup browser...")
+    try:
+        new_storage_state = await app.get_storage_state()
+        if new_storage_state:
+            async for db in get_db():
+                dm = DataManager(db)
+                await dm.save_browser_session(
+                    app.session_id, 
+                    config.CONFIG["user"], 
+                    new_storage_state
+                )
+        await app.close(save_before_close=False)
+    except Exception as e:
+        print(f"⚠️ Error saat menutup browser: {e}")
 
 @api_app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
@@ -254,128 +399,18 @@ async def main():
     parser.add_argument("--port", type=int, default=8000, help="Port untuk mode API")
     args = parser.parse_args()
 
-    # Gunakan session ID yang spesifik untuk akun agar cookies tidak bercampur
-    user_email = config.CONFIG.get("user", "default")
-    safe_email = user_email.replace("@", "_").replace(".", "_")
-    session_id = f"deepseek-{safe_email}"
-
-    app = BrowserlessSessionManager(
-        browserless_url=config.CONFIG["browserless_url"],
-        site_name="deepseek",
-        session_dir="deepseek_sessions",
-        session_id=session_id
-    )
-    
-    # Ambil session dari DB jika ada
-    storage_state = None
-    async for db in get_db():
-        dm = DataManager(db)
-        storage_state = await dm.get_browser_session(app.session_id)
-
-    connected = await app.connect_browserless(storage_state=storage_state)
-    if not connected:
-        print("Exiting because Browserless connection failed.")
-        return
-
-    page = await app.new_page()
-    if not page:
-        print("Exiting because page could not be created.")
-        await app.close(save_before_close=False)
-        return
-        
-    url = "https://chat.deepseek.com"
-    await page.goto(url, wait_until="domcontentloaded")
-    
-    # Login check dengan deteksi network dan DOM terbaru
-    login_indicators = [
-        "textarea[placeholder*='Message DeepSeek']",
-        "div[class*='ede5bc47']",  # Avatar lingkaran (M)
-        "div[class*='_9d8da05']",  # Email display
-        "textarea#chat-input",
-        ".ds-avatar"
-    ]
-    
-    is_logged_in = False
-    
-    # 1. Cek apakah sudah login berdasarkan elemen yang ada
-    for indicator in login_indicators:
-        try:
-            await page.wait_for_selector(indicator, state="visible", timeout=1000)
-            is_logged_in = True
-            break
-        except:
-            continue
-
-    if is_logged_in:
-        print("✅ Session sudah aktif.")
-    else:
-        print("🔐 Session expired atau belum login, melakukan login otomatis...")
-        try:
-            # Pantau network untuk konfirmasi login sukses (200 OK pada endpoint login)
-            login_success = asyncio.Future()
-            
-            async def handle_response(response):
-                if "/api/v0/users/login" in response.url and response.status == 200:
-                    if not login_success.done():
-                        login_success.set_result(True)
-            
-            page.on("response", handle_response)
-
-            # Jika tidak di halaman login, cari tombol login
-            if "login" not in page.url.lower():
-                try:
-                    login_btn = await page.query_selector('text="Log in"')
-                    if login_btn:
-                        await login_btn.click()
-                        await page.wait_for_load_state("networkidle")
-                except:
-                    pass
-
-            # Isi form login sesuai HTML yang diberikan user
-            # Username/Email
-            email_input = "input[type='text'].ds-input__input[placeholder*='Phone']"
-            await page.wait_for_selector(email_input, timeout=10000)
-            await page.fill(email_input, config.CONFIG["user"])
-            
-            # Password
-            pass_input = "input[type='password'].ds-input__input[placeholder='Password']"
-            await page.fill(pass_input, config.CONFIG["password"])
-            
-            # Submit Button (berdasarkan HTML div role=button yang diberikan)
-            submit_btn = "div.ds-sign-up-form__register-button[role='button']"
-            await page.click(submit_btn)
-
-            # Tunggu konfirmasi dari Network atau elemen dashboard
-            try:
-                # Prioritas 1: Tunggu respons network 200 OK
-                await asyncio.wait_for(login_success, timeout=1000)
-                print("🌐 Network: Login success (200 OK)")
-            except:
-                # Prioritas 2: Tunggu elemen textarea dashboard muncul
-                await page.wait_for_selector("textarea[placeholder*='Message DeepSeek']", timeout=10000)
-            
-            print("✅ Login otomatis berhasil.")
-            
-            # Bersihkan listener
-            page.remove_listener("response", handle_response)
-            
-        except Exception as e:
-            print(f"❌ Login otomatis gagal: {e}")
-            if "chat" in page.url:
-                print("⚠️  URL menunjukkan area chat, lanjut meskipun deteksi error.")
-            else:
-                await app.close(save_before_close=False)
-                return
-
-    chat_handler = DeepSeekChatHandler(page)
-
     if args.mode == "chat":
-        await run_chat_mode(chat_handler, app.session_id)
+        app, chat_handler = await initialize_deepseek()
+        if not app or not chat_handler:
+            return
+            
+        try:
+            await run_chat_mode(chat_handler, app.session_id)
+        finally:
+            await cleanup_deepseek(app)
+            
     elif args.mode == "api":
-        # Inject state untuk API
-        api_state.session_manager = app
-        api_state.chat_handler = chat_handler
-        
+        # Lifespan will handle initialization when uvicorn starts
         print(f"🚀 Starting API server on port {args.port}...")
         config_uvicorn = uvicorn.Config(
             api_app, 
@@ -386,22 +421,6 @@ async def main():
         )
         server = uvicorn.Server(config_uvicorn)
         await server.serve()
-
-    print("\nMenyimpan session dan menutup browser...")
-    try:
-        # Simpan session ke DB sebelum tutup
-        new_storage_state = await app.get_storage_state()
-        if new_storage_state:
-            async for db in get_db():
-                dm = DataManager(db)
-                await dm.save_browser_session(
-                    app.session_id, 
-                    config.CONFIG["user"], 
-                    new_storage_state
-                )
-        await app.close(save_before_close=False)
-    except Exception as e:
-        print(f"⚠️ Error saat menutup browser: {e}")
 
 if __name__ == "__main__":
     try:
