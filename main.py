@@ -15,7 +15,8 @@ from sqlalchemy import or_
 import uuid
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
+from datetime import datetime
 
 # --- API Models & State ---
 class ChatRequest(BaseModel):
@@ -24,6 +25,17 @@ class ChatRequest(BaseModel):
     image_path: Optional[str] = Field(None, json_schema_extra={"example": "/path/to/image.jpg"})
     image_base64: Optional[str] = Field(None, json_schema_extra={"description": "Base64 encoded image string"})
 
+class ChatResponse(BaseModel):
+    status: str = Field(..., json_schema_extra={"example": "success"})
+    chat_id: str = Field(..., json_schema_extra={"example": "02018e6f-cf61-44c0-9479-726759cd4f6f"})
+    response: str = Field(..., json_schema_extra={"example": "Halo! Saya adalah AI..."})
+
+class ChatListItem(BaseModel):
+    id: str = Field(..., json_schema_extra={"example": "02018e6f-cf61-44c0-9479-726759cd4f6f"})
+    chat_id: Optional[str] = Field(None, json_schema_extra={"example": "12345678"})
+    title: Optional[str] = Field(None, json_schema_extra={"example": "Judul Chat Baru"})
+    created_at: datetime = Field(..., json_schema_extra={"example": "2023-10-27T10:00:00"})
+
 class APIState:
     session_manager: Optional[BrowserlessSessionManager] = None
     chat_handler: Optional[DeepSeekChatHandler] = None
@@ -31,7 +43,7 @@ class APIState:
 api_state = APIState()
 api_app = FastAPI(title="DeepSeek Scrapper API")
 
-@api_app.post("/chat")
+@api_app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     if not api_state.chat_handler:
         raise HTTPException(status_code=503, detail="Chat handler not initialized")
@@ -87,6 +99,11 @@ async def chat_endpoint(request: ChatRequest):
                 await api_state.chat_handler.wait_for_response()
                 response_text = await api_state.chat_handler.get_latest_response()
                 
+                # Coba ambil title chat baru jika belum ada judul
+                chat_title = await api_state.chat_handler.get_chat_title()
+                if chat_title:
+                    await dm.update_chat_title(chat_uuid, chat_title)
+                
                 if response_text:
                     await dm.save_chat_message(session_id, chat_uuid, "assistant", response_text)
                     return {"status": "success", "chat_id": chat_uuid, "response": response_text}
@@ -98,6 +115,25 @@ async def chat_endpoint(request: ChatRequest):
             # Cleanup temp file
             if temp_image_path and os.path.exists(temp_image_path):
                 os.remove(temp_image_path)
+
+@api_app.get("/chats", response_model=List[ChatListItem])
+async def list_chats_endpoint():
+    if not api_state.session_manager:
+        raise HTTPException(status_code=503, detail="Session manager not initialized")
+    
+    session_id = api_state.session_manager.session_id
+    async for db in get_db():
+        dm = DataManager(db)
+        chats = await dm.get_chats(session_id)
+        return [
+            {
+                "id": chat.id,
+                "chat_id": chat.chat_id,
+                "title": chat.title,
+                "created_at": chat.created_at
+            }
+            for chat in chats
+        ]
 
 async def run_chat_mode(chat_handler: DeepSeekChatHandler, session_id: str):
     print("\n💬 Mode Chat Aktif. Ketik 'exit' untuk keluar.")
@@ -187,6 +223,11 @@ async def run_chat_mode(chat_handler: DeepSeekChatHandler, session_id: str):
 
                 await chat_handler.wait_for_response()
                 response_text = await chat_handler.get_latest_response()
+                
+                # Update title jika ada
+                chat_title = await chat_handler.get_chat_title()
+                if chat_title:
+                    await dm.update_chat_title(chat_uuid, chat_title)
                 
                 if response_text:
                     print(f"\n🤖 AI:\n{'-'*30}\n{response_text}\n{'-'*30}")

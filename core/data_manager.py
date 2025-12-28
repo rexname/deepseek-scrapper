@@ -123,6 +123,25 @@ class DataManager:
         
         await self.db.commit()
 
+    async def update_chat_title(self, chat_id: str, title: str):
+        """Update judul chat di database"""
+        if not title:
+            return
+            
+        stmt = select(Chat).where(or_(Chat.chat_id == chat_id, Chat.id == chat_id))
+        res = await self.db.execute(stmt)
+        chat = res.scalar_one_or_none()
+        if chat:
+            chat.title = title
+            await self.db.commit()
+            print(f"📝 Title updated for chat {chat_id}: {title}")
+
+    async def get_chats(self, session_id: str):
+        """Ambil daftar chat untuk session tertentu"""
+        stmt = select(Chat).where(Chat.session_id == session_id).order_by(Chat.created_at.desc())
+        res = await self.db.execute(stmt)
+        return res.scalars().all()
+
     async def delete_chat(self, chat_id: str):
         """Hapus chat dan pesan terkait dari database"""
         stmt_chat = select(Chat).where(or_(Chat.chat_id == chat_id, Chat.id == chat_id))

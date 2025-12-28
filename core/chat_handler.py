@@ -139,6 +139,29 @@ class DeepSeekChatHandler:
             print(f"❌ Gagal mengirim pesan: {e}")
             return False
 
+    async def get_chat_title(self):
+        """Mengambil judul chat dari sidebar atau header"""
+        try:
+            # 1. Coba cari elemen judul yang aktif di sidebar
+            title_selectors = [
+                "xpath=//div[contains(@class, 'ds-sidebar-item--active')]//div[contains(@class, 'ds-sidebar-item__title')]",
+                "xpath=//div[contains(@class, 'ds-sidebar-item--active')]",
+                "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[1]/div[2]/div[2]/div/div[2]/div/div/div/div[1]/div/div/div[2]/div[1]",
+                "title"
+            ]
+            for selector in title_selectors:
+                try:
+                    element = await self.page.query_selector(selector)
+                    if element:
+                        title = await element.inner_text()
+                        if title and len(title.strip()) > 0:
+                            return title.strip()
+                except:
+                    continue
+            return None
+        except:
+            return None
+
     async def wait_for_response(self, timeout: int = 120000, stability_check: bool = True):
         """Menunggu sampai AI selesai memberikan respon"""
         print("⏳ Menunggu respon AI...")
