@@ -48,7 +48,14 @@ async def chat_endpoint(request: ChatRequest):
     if not api_state.chat_handler:
         raise HTTPException(status_code=503, detail="Chat handler not initialized")
     
-    chat_uuid = request.chat_id or str(uuid.uuid4())
+    # Logic chat_id "new" untuk membuat chat baru
+    if request.chat_id == "new":
+        chat_uuid = str(uuid.uuid4())
+        print("🆕 Request chat baru terdeteksi, mengarahkan ke halaman utama...")
+        await api_state.chat_handler.page.goto("https://chat.deepseek.com/", wait_until="networkidle")
+    else:
+        chat_uuid = request.chat_id or str(uuid.uuid4())
+    
     session_id = api_state.session_manager.session_id
     
     # Handle image_base64
