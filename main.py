@@ -39,21 +39,26 @@ class ChatListItem(BaseModel):
 
 class APIState:
     session_manager: Optional[BrowserlessSessionManager] = None
-    chat_handler: Optional[DeepSeekChatHandler] = None
+    handler_pool: asyncio.Queue = asyncio.Queue()
+    _handlers: List[DeepSeekChatHandler] = []
 
 api_state = APIState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Setup for API mode
-    print("🚀 Initializing browser for API...")
-    app_manager, chat_handler = await initialize_deepseek()
-    if app_manager and chat_handler:
+    max_workers = config.CONFIG.get("max_concurrency", 5)
+    print(f"🚀 Initializing {max_workers} browser pages for API pool...")
+    
+    app_manager, handlers = await initialize_deepseek(num_pages=max_workers)
+    if app_manager and handlers:
         api_state.session_manager = app_manager
-        api_state.chat_handler = chat_handler
-        print("✅ API ready.")
+        api_state._handlers = handlers
+        for h in handlers:
+            api_state.handler_pool.put_nowait(h)
+        print(f"✅ API ready with {len(handlers)} workers.")
     else:
-        print("❌ API failed to initialize browser.")
+        print("❌ API failed to initialize browser pool.")
     
     yield
     
@@ -63,7 +68,7 @@ async def lifespan(app: FastAPI):
 
 api_app = FastAPI(title="DeepSeek Scrapper API", lifespan=lifespan)
 
-async def initialize_deepseek():
+async def initialize_deepseek(num_pages: int = 1):
     # Gunakan session ID yang spesifik untuk akun agar cookies tidak bercampur
     user_email = config.CONFIG.get("user", "default")
     safe_email = user_email.replace("@", "_").replace(".", "_")
@@ -85,92 +90,86 @@ async def initialize_deepseek():
     connected = await app.connect_browserless(storage_state=storage_state)
     if not connected:
         print("Exiting because Browserless connection failed.")
-        return None, None
+        return None, []
 
-    page = await app.new_page()
-    if not page:
-        print("Exiting because page could not be created.")
+    # Login check dengan satu halaman utama dulu
+    main_page = await app.new_page()
+    if not main_page:
+        print("Exiting because main page could not be created.")
         await app.close(save_before_close=False)
-        return None, None
+        return None, []
         
     url = "https://chat.deepseek.com"
-    await page.goto(url, wait_until="domcontentloaded")
+    await main_page.goto(url, wait_until="domcontentloaded")
     
-    # Login check dengan deteksi network dan DOM terbaru
     login_indicators = [
         "textarea[placeholder*='Message DeepSeek']",
-        "div[class*='ede5bc47']",  # Avatar lingkaran (M)
-        "div[class*='_9d8da05']",  # Email display
+        "div[class*='ede5bc47']",
+        "div[class*='_9d8da05']",
         "textarea#chat-input",
         ".ds-avatar"
     ]
     
     is_logged_in = False
-    
-    # 1. Cek apakah sudah login berdasarkan elemen yang ada
     for indicator in login_indicators:
         try:
-            await page.wait_for_selector(indicator, state="visible", timeout=1000)
+            await main_page.wait_for_selector(indicator, state="visible", timeout=2000)
             is_logged_in = True
             break
         except:
             continue
 
-    if is_logged_in:
-        print("✅ Session sudah aktif.")
-    else:
+    if not is_logged_in:
         print("🔐 Session expired atau belum login, melakukan login otomatis...")
         try:
-            # Pantau network untuk konfirmasi login sukses (200 OK pada endpoint login)
             login_success = asyncio.Future()
-            
             async def handle_response(response):
                 if "/api/v0/users/login" in response.url and response.status == 200:
                     if not login_success.done():
                         login_success.set_result(True)
-            
-            page.on("response", handle_response)
+            main_page.on("response", handle_response)
 
-            # Jika tidak di halaman login, cari tombol login
-            if "login" not in page.url.lower():
+            if "login" not in main_page.url.lower():
                 try:
-                    login_btn = await page.query_selector('text="Log in"')
+                    login_btn = await main_page.query_selector('text="Log in"')
                     if login_btn:
                         await login_btn.click()
-                        await page.wait_for_load_state("networkidle")
+                        await main_page.wait_for_load_state("networkidle")
                 except:
                     pass
 
-            # Isi form login sesuai HTML yang diberikan user
-            email_input = "input[type='text'].ds-input__input[placeholder*='Phone']"
-            await page.wait_for_selector(email_input, timeout=10000)
-            await page.fill(email_input, config.CONFIG["user"])
-            
-            pass_input = "input[type='password'].ds-input__input[placeholder='Password']"
-            await page.fill(pass_input, config.CONFIG["password"])
-            
-            submit_btn = "div.ds-sign-up-form__register-button[role='button']"
-            await page.click(submit_btn)
+            await main_page.wait_for_selector("input[type='text'].ds-input__input", timeout=10000)
+            await main_page.fill("input[type='text'].ds-input__input", config.CONFIG["user"])
+            await main_page.fill("input[type='password'].ds-input__input", config.CONFIG["password"])
+            await main_page.click("div.ds-sign-up-form__register-button[role='button']")
 
             try:
-                await asyncio.wait_for(login_success, timeout=1000)
-                print("🌐 Network: Login success (200 OK)")
+                await asyncio.wait_for(login_success, timeout=10000)
+                print("🌐 Network: Login success")
             except:
-                await page.wait_for_selector("textarea[placeholder*='Message DeepSeek']", timeout=10000)
+                await main_page.wait_for_selector("textarea[placeholder*='Message DeepSeek']", timeout=10000)
             
             print("✅ Login otomatis berhasil.")
-            page.remove_listener("response", handle_response)
-            
+            main_page.remove_listener("response", handle_response)
         except Exception as e:
             print(f"❌ Login otomatis gagal: {e}")
-            if "chat" in page.url:
-                print("⚠️  URL menunjukkan area chat, lanjut meskipun deteksi error.")
+            if "chat" in main_page.url:
+                print("⚠️ Lanjut meskipun deteksi error.")
             else:
                 await app.close(save_before_close=False)
-                return None, None
+                return None, []
 
-    chat_handler = DeepSeekChatHandler(page)
-    return app, chat_handler
+    # Buat pool halaman
+    handlers = [DeepSeekChatHandler(main_page)]
+    if num_pages > 1:
+        print(f"📑 Opening {num_pages-1} additional pages...")
+        for i in range(num_pages - 1):
+            page = await app.new_page()
+            await page.goto(url, wait_until="domcontentloaded")
+            handlers.append(DeepSeekChatHandler(page))
+            print(f"  - Page {i+2} opened.")
+
+    return app, handlers
 
 async def cleanup_deepseek(app: BrowserlessSessionManager):
     print("\nMenyimpan session dan menutup browser...")
@@ -190,90 +189,90 @@ async def cleanup_deepseek(app: BrowserlessSessionManager):
 
 @api_app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
-    if not api_state.chat_handler:
-        raise HTTPException(status_code=503, detail="Chat handler not initialized")
-    
-    # Logic chat_id "new" untuk membuat chat baru
-    if request.chat_id == "new":
-        chat_uuid = str(uuid.uuid4())
-        print("🆕 Request chat baru terdeteksi, mengarahkan ke halaman utama...")
-        await api_state.chat_handler.page.goto("https://chat.deepseek.com/", wait_until="networkidle")
-    else:
-        chat_uuid = request.chat_id or str(uuid.uuid4())
-    
-    session_id = api_state.session_manager.session_id
-    
-    # Handle image_base64
-    temp_image_path = None
-    if request.image_base64:
-        try:
-            # Create temp directory if not exists
-            os.makedirs("temp_uploads", exist_ok=True)
-            temp_image_path = f"temp_uploads/{uuid.uuid4()}.png"
-            
-            # Decode base64
-            header, data = request.image_base64.split(",") if "," in request.image_base64 else (None, request.image_base64)
-            with open(temp_image_path, "wb") as f:
-                f.write(base64.b64decode(data))
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {e}")
-
-    # Use image_path if provided, otherwise use temp_image_path from base64
-    final_image_path = request.image_path or temp_image_path
-
-    user_email = config.CONFIG.get("user")
-    async for db in get_db():
-        dm = DataManager(db)
+    # Acquire handler from pool
+    handler = await api_state.handler_pool.get()
+    try:
+        # Logic chat_id "new" untuk membuat chat baru
+        if request.chat_id == "new":
+            chat_uuid = str(uuid.uuid4())
+            print("🆕 Request chat baru terdeteksi, mengarahkan ke halaman utama...")
+            await handler.page.goto("https://chat.deepseek.com/", wait_until="networkidle")
+        else:
+            chat_uuid = request.chat_id or str(uuid.uuid4())
         
-        # Jika chat_id diberikan, pastikan browser di URL yang benar
-        if request.chat_id:
-            # Cari di DB untuk mendapatkan real_chat_id (DeepSeek ID)
-            stmt = select(ChatModel).where(or_(ChatModel.chat_id == request.chat_id, ChatModel.id == request.chat_id))
-            res = await db.execute(stmt)
-            db_chat = res.scalar_one_or_none()
-            
-            if db_chat and db_chat.chat_id and len(db_chat.chat_id) < 40: # Jika bukan UUID temp
-                chat_url = f"https://chat.deepseek.com/a/chat/s/{db_chat.chat_id}"
-                if db_chat.chat_id not in api_state.chat_handler.page.url:
-                    print(f"🔗 Mengarahkan API ke link chat: {chat_url}")
-                    await api_state.chat_handler.page.goto(chat_url, wait_until="networkidle")
-
-        await dm.save_chat_message(session_id, chat_uuid, "user", request.message, account_email=user_email)
+        session_id = api_state.session_manager.session_id
         
-        try:
-            success = await api_state.chat_handler.send_message(request.message, image_path=final_image_path)
-            if success:
-                current_url = api_state.chat_handler.page.url
-                if "/a/chat/s/" in current_url:
-                    real_chat_id = current_url.split("/a/chat/s/")[-1].split("?")[0].split("#")[0]
-                    await dm.update_chat_id(chat_uuid, real_chat_id)
-                    chat_uuid = real_chat_id
+        # Handle image_base64
+        temp_image_path = None
+        if request.image_base64:
+            try:
+                # Create temp directory if not exists
+                os.makedirs("temp_uploads", exist_ok=True)
+                temp_image_path = f"temp_uploads/{uuid.uuid4()}.png"
+                
+                # Decode base64
+                header, data = request.image_base64.split(",") if "," in request.image_base64 else (None, request.image_base64)
+                with open(temp_image_path, "wb") as f:
+                    f.write(base64.b64decode(data))
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {e}")
 
-                await api_state.chat_handler.wait_for_response()
-                response_text = await api_state.chat_handler.get_latest_response()
-                
-                # Coba ambil title chat baru jika belum ada judul
-                chat_title = await api_state.chat_handler.get_chat_title()
-                if chat_title:
-                    await dm.update_chat_title(chat_uuid, chat_title)
-                
-                if response_text:
-                    await dm.save_chat_message(session_id, chat_uuid, "assistant", response_text, account_email=user_email)
-                    return {"status": "success", "chat_id": chat_uuid, "response": response_text}
-                
-                raise HTTPException(status_code=500, detail="Failed to get AI response")
+        # Use image_path if provided, otherwise use temp_image_path from base64
+        final_image_path = request.image_path or temp_image_path
+
+        user_email = config.CONFIG.get("user")
+        async for db in get_db():
+            dm = DataManager(db)
             
-            raise HTTPException(status_code=500, detail="Failed to send message")
-        finally:
-            # Cleanup temp file
-            if temp_image_path and os.path.exists(temp_image_path):
-                os.remove(temp_image_path)
+            # Jika chat_id diberikan, pastikan browser di URL yang benar
+            if request.chat_id and request.chat_id != "new":
+                # Cari di DB untuk mendapatkan real_chat_id (DeepSeek ID)
+                stmt = select(ChatModel).where(or_(ChatModel.chat_id == request.chat_id, ChatModel.id == request.chat_id))
+                res = await db.execute(stmt)
+                db_chat = res.scalar_one_or_none()
+                
+                if db_chat and db_chat.chat_id and len(db_chat.chat_id) < 40: # Jika bukan UUID temp
+                    chat_url = f"https://chat.deepseek.com/a/chat/s/{db_chat.chat_id}"
+                    if db_chat.chat_id not in handler.page.url:
+                        print(f"🔗 Mengarahkan API ke link chat: {chat_url}")
+                        await handler.page.goto(chat_url, wait_until="networkidle")
+
+            await dm.save_chat_message(session_id, chat_uuid, "user", request.message, account_email=user_email)
+            
+            try:
+                success = await handler.send_message(request.message, image_path=final_image_path)
+                if success:
+                    current_url = handler.page.url
+                    if "/a/chat/s/" in current_url:
+                        real_chat_id = current_url.split("/a/chat/s/")[-1].split("?")[0].split("#")[0]
+                        await dm.update_chat_id(chat_uuid, real_chat_id)
+                        chat_uuid = real_chat_id
+
+                    await handler.wait_for_response()
+                    response_text = await handler.get_latest_response()
+                    
+                    # Coba ambil title chat baru jika belum ada judul
+                    chat_title = await handler.get_chat_title()
+                    if chat_title:
+                        await dm.update_chat_title(chat_uuid, chat_title)
+                    
+                    if response_text:
+                        await dm.save_chat_message(session_id, chat_uuid, "assistant", response_text, account_email=user_email)
+                        return {"status": "success", "chat_id": chat_uuid, "response": response_text}
+                    
+                    raise HTTPException(status_code=500, detail="Failed to get AI response")
+                
+                raise HTTPException(status_code=500, detail="Failed to send message")
+            finally:
+                # Cleanup temp file
+                if temp_image_path and os.path.exists(temp_image_path):
+                    os.remove(temp_image_path)
+    finally:
+        # Release handler back to pool
+        api_state.handler_pool.put_nowait(handler)
 
 @api_app.get("/chats", response_model=List[ChatListItem])
 async def list_chats_endpoint():
-    if not api_state.session_manager:
-        raise HTTPException(status_code=503, detail="Session manager not initialized")
-    
     user_email = config.CONFIG.get("user")
     async for db in get_db():
         dm = DataManager(db)

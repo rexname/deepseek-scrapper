@@ -17,4 +17,5 @@ CONFIG = {
     "ua": os.getenv("ua"),
     "user": os.getenv("user"),
     "password": os.getenv("password"),
+    "max_concurrency": int(os.getenv("MAX_CONCURRENCY", "5")),
 }
