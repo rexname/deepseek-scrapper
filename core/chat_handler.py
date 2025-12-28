@@ -90,58 +90,49 @@ class DeepSeekChatHandler:
                     print(f"⚠️  Gagal upload gambar: {upload_err}")
 
             # 4. Klik tombol kirim dengan berbagai strategi
-            # Tunggu tombol kirim aktif jika ada upload gambar
-            if image_path:
-                await asyncio.sleep(2)
+            # Prioritaskan tombol Enter karena lebih cepat dan handal
+            await self.page.keyboard.press("Enter")
+            await asyncio.sleep(0.5)
 
-            send_selectors = [
-                # 1. XPath saat ada pesan sebelumnya (New Chat context)
-                "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[2]/div[1]/div[2]/div[2]/div[2]/div[1]/div[1]/div[2]/div[3]/div[2]/div[1]/div[1]",
-                # 2. XPath saat chat baru kosong
-                "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[2]/div[3]/div[2]/div[1]/div[1]",
-                # 3. Selector umum berbasis atribut
-                "div[role='button'][aria-disabled='false']",
-                "div.ds-icon-button:not(.ds-icon-button--disabled)",
-                "xpath=//div[@role='button' and @aria-disabled='false']",
-                ".ds-icon-send"
-            ]
-            
-            # Tunggu tombol kirim aktif
-            print("⏳ Menunggu tombol kirim aktif...")
-            target_send_selector = None
-            
-            # Coba cari selector yang visible dan enabled
-            for selector in send_selectors:
-                try:
-                    # Timeout singkat saja per selector agar cepat berpindah
-                    await self.page.wait_for_selector(selector, state="visible", timeout=2000)
-                    button = await self.page.query_selector(selector)
-                    if button:
-                        is_disabled = await button.get_attribute("aria-disabled") == "true"
-                        if not is_disabled:
-                            target_send_selector = selector
-                            break
-                except:
-                    continue
+            # Cek apakah textarea masih ada isinya (jika Enter tidak bekerja)
+            try:
+                textarea_val = await self.page.eval_on_selector(target_selector, "el => el.value")
+            except Exception:
+                # Jika textarea tidak ditemukan, anggap pesan sudah terkirim (karena UI refresh/ganti halaman)
+                print("ℹ️  Textarea tidak ditemukan lagi, mengasumsikan pesan terkirim.")
+                textarea_val = ""
 
-            sent = False
-            if target_send_selector:
-                button = await self.page.query_selector(target_send_selector)
-                try:
-                    # Klik dengan timeout singkat. Jika element hilang/berubah tepat saat diklik, 
-                    # Playwright sering melempar timeout meski aksi sebenarnya masuk.
-                    await button.click(force=True, timeout=1500)
-                    sent = True
-                except Exception:
-                    # Silent fallback: Jika klik gagal, kita tidak langsung print error panjang.
-                    # Kita beri jeda dan asumsikan terkirim jika tidak ada error fatal lain.
-                    await asyncio.sleep(0.5)
-                    sent = True 
-            
-            if not sent:
-                await self.page.keyboard.press("Enter")
-                sent = True 
+            if textarea_val and len(textarea_val.strip()) > 0:
+                print("⏳ Enter tidak berhasil, mencoba klik tombol kirim...")
+                send_selectors = [
+                    # SVG Selector dari user
+                    "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[2]/div[3]/div[2]/div[1]/div[2]/svg[1]",
+                    # 1. XPath saat ada pesan sebelumnya (New Chat context)
+                    "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[2]/div[1]/div[2]/div[2]/div[2]/div[1]/div[1]/div[2]/div[3]/div[2]/div[1]/div[1]",
+                    # 2. XPath saat chat baru kosong
+                    "xpath=//*[@id=\"root\"]/div[1]/div[1]/div[2]/div[3]/div[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[2]/div[3]/div[2]/div[1]/div[1]",
+                    # 3. Selector umum berbasis atribut
+                    "div[role='button'][aria-disabled='false']",
+                    "div.ds-icon-button:not(.ds-icon-button--disabled)",
+                    "xpath=//div[@role='button' and @aria-disabled='false']",
+                    ".ds-icon-send"
+                ]
                 
+                target_send_selector = None
+                for selector in send_selectors:
+                    try:
+                        await self.page.wait_for_selector(selector, state="visible", timeout=1500)
+                        target_send_selector = selector
+                        break
+                    except:
+                        continue
+
+                if target_send_selector:
+                    try:
+                        await self.page.click(target_send_selector, force=True, timeout=2000)
+                    except Exception:
+                        pass
+            
             print(f"✉️  Pesan dikirim.")
             return True
         except Exception as e:

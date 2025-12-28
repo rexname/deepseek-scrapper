@@ -11,6 +11,7 @@ from core.database import get_db
 from core.models import Session as SessionModel, Chat as ChatModel, Message as MessageModel
 from core.data_manager import DataManager
 from sqlalchemy.future import select
+from sqlalchemy import or_
 import uuid
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -19,6 +20,7 @@ from typing import Optional
 # --- API Models & State ---
 class ChatRequest(BaseModel):
     message: str = Field(..., json_schema_extra={"example": "Halo, siapa namamu?"})
+    chat_id: Optional[str] = Field(None, json_schema_extra={"example": "02018e6f-cf61-44c0-9479-726759cd4f6f"})
     image_path: Optional[str] = Field(None, json_schema_extra={"example": "/path/to/image.jpg"})
     image_base64: Optional[str] = Field(None, json_schema_extra={"description": "Base64 encoded image string"})
 
@@ -34,7 +36,7 @@ async def chat_endpoint(request: ChatRequest):
     if not api_state.chat_handler:
         raise HTTPException(status_code=503, detail="Chat handler not initialized")
     
-    chat_uuid = str(uuid.uuid4())
+    chat_uuid = request.chat_id or str(uuid.uuid4())
     session_id = api_state.session_manager.session_id
     
     # Handle image_base64
@@ -57,6 +59,20 @@ async def chat_endpoint(request: ChatRequest):
 
     async for db in get_db():
         dm = DataManager(db)
+        
+        # Jika chat_id diberikan, pastikan browser di URL yang benar
+        if request.chat_id:
+            # Cari di DB untuk mendapatkan real_chat_id (DeepSeek ID)
+            stmt = select(ChatModel).where(or_(ChatModel.chat_id == request.chat_id, ChatModel.id == request.chat_id))
+            res = await db.execute(stmt)
+            db_chat = res.scalar_one_or_none()
+            
+            if db_chat and db_chat.chat_id and len(db_chat.chat_id) < 40: # Jika bukan UUID temp
+                chat_url = f"https://chat.deepseek.com/a/chat/s/{db_chat.chat_id}"
+                if db_chat.chat_id not in api_state.chat_handler.page.url:
+                    print(f"🔗 Mengarahkan API ke link chat: {chat_url}")
+                    await api_state.chat_handler.page.goto(chat_url, wait_until="networkidle")
+
         await dm.save_chat_message(session_id, chat_uuid, "user", request.message)
         
         try:
@@ -99,7 +115,7 @@ async def run_chat_mode(chat_handler: DeepSeekChatHandler, session_id: str):
         
         chat_uuid = None
         
-        if last_chat:
+        if last_chat and last_chat.chat_id:
             last_chat_url = f"https://chat.deepseek.com/a/chat/s/{last_chat.chat_id}"
             print(f"🔄 Mencoba melanjutkan chat terakhir: {last_chat_url}")
             
@@ -108,7 +124,7 @@ async def run_chat_mode(chat_handler: DeepSeekChatHandler, session_id: str):
             
             # Verifikasi apakah link benar-benar terbuka dan bukan redirect ke /
             current_url = chat_handler.page.url
-            if last_chat.chat_id in current_url:
+            if last_chat.chat_id and last_chat.chat_id in current_url:
                 print(f"✅ Berhasil memuat chat terakhir: {last_chat.chat_id}")
                 chat_uuid = last_chat.chat_id
                 # Tunggu input box muncul
@@ -122,7 +138,10 @@ async def run_chat_mode(chat_handler: DeepSeekChatHandler, session_id: str):
                 await chat_handler.page.goto("https://chat.deepseek.com", wait_until="networkidle")
                 chat_uuid = str(uuid.uuid4())
         else:
-            print("🆕 Memulai chat baru (tidak ada history).")
+            if not last_chat:
+                print("🆕 Memulai chat baru (tidak ada history).")
+            else:
+                print("🆕 Memulai chat baru (chat terakhir tidak memiliki ID valid).")
             await chat_handler.page.goto("https://chat.deepseek.com", wait_until="networkidle")
             chat_uuid = str(uuid.uuid4())
 

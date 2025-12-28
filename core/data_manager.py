@@ -1,6 +1,7 @@
 import json
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import or_
 from .models import Account, Session, Chat, Message
 from datetime import datetime
 
@@ -60,18 +61,23 @@ class DataManager:
             await self.db.flush()
 
         # Pastikan chat record ada
-        stmt_chat = select(Chat).where(Chat.chat_id == chat_id)
+        # Cari berdasarkan chat_id (bisa UUID temp atau ID asli DeepSeek)
+        # Atau cari berdasarkan id (internal UUID) jika chat_id adalah UUID
+        stmt_chat = select(Chat).where(or_(Chat.chat_id == chat_id, Chat.id == chat_id))
         res_chat = await self.db.execute(stmt_chat)
         db_chat = res_chat.scalar_one_or_none()
         
         if not db_chat:
+            # Jika tidak ada, buat baru. Gunakan chat_id sebagai chat_id.
+            # Jika chat_id terlihat seperti UUID, kita bisa set ke id juga jika mau, 
+            # tapi biarkan SQLAlchemy handle id otomatis.
             db_chat = Chat(chat_id=chat_id, session_id=session_id)
             self.db.add(db_chat)
             await self.db.flush()
 
-        # Simpan pesan
+        # Simpan pesan - SELALU gunakan db_chat.id (PK) sebagai foreign key
         new_msg = Message(
-            chat_id=chat_id,
+            chat_id=db_chat.id,
             role=role,
             content=content,
             image_url=image_url
@@ -80,55 +86,46 @@ class DataManager:
         await self.db.commit()
 
     async def update_chat_id(self, old_id: str, new_id: str):
-        """Update chat_id dari UUID temporary ke ID asli DeepSeek menggunakan pola Create-Move-Delete"""
+        """Update chat_id dari UUID temporary ke ID asli DeepSeek"""
         if old_id == new_id:
             return
 
-        # 1. Ambil data chat lama
-        stmt_old = select(Chat).where(Chat.chat_id == old_id)
+        # 1. Ambil data chat lama (cari berdasarkan chat_id atau id)
+        stmt_old = select(Chat).where(or_(Chat.chat_id == old_id, Chat.id == old_id))
         res_old = await self.db.execute(stmt_old)
         old_chat = res_old.scalar_one_or_none()
         
         if not old_chat:
             return
 
-        # 2. Cek apakah new_id sudah ada
+        # 2. Cek apakah new_id sudah ada di record lain
         stmt_check = select(Chat).where(Chat.chat_id == new_id)
         res_check = await self.db.execute(stmt_check)
-        new_chat = res_check.scalar_one_or_none()
+        existing_chat = res_check.scalar_one_or_none()
 
-        if not new_chat:
-            # Buat chat baru dengan ID baru jika belum ada
-            new_chat = Chat(
-                chat_id=new_id,
-                session_id=old_chat.session_id,
-                title=old_chat.title,
-                created_at=old_chat.created_at
-            )
-            self.db.add(new_chat)
-            await self.db.flush() # Pastikan new_chat masuk ke DB agar FK Message valid
-
-        # 3. Pindahkan semua pesan ke chat_id baru
-        stmt_msgs = select(Message).where(Message.chat_id == old_id)
-        res_msgs = await self.db.execute(stmt_msgs)
-        for msg in res_msgs.scalars():
-            msg.chat_id = new_id
-        
-        # 4. Hapus chat lama
-        await self.db.delete(old_chat)
+        if existing_chat:
+            # Jika sudah ada chat dengan new_id tersebut, kita harus MERGE.
+            # Karena Message.chat_id mereferensikan Chat.id (UUID),
+            # kita pindahkan semua pesan dari old_chat.id ke existing_chat.id.
+            if existing_chat.id != old_chat.id:
+                stmt_msgs = select(Message).where(Message.chat_id == old_chat.id)
+                res_msgs = await self.db.execute(stmt_msgs)
+                for msg in res_msgs.scalars():
+                    msg.chat_id = existing_chat.id
+                
+                # Hapus chat lama
+                await self.db.delete(old_chat)
+                print(f"🔗 Merged chat {old_id} into existing chat {new_id}")
+        else:
+            # Jika belum ada, cukup update chat_id di record yang sekarang
+            old_chat.chat_id = new_id
+            print(f"🔄 Updated chat_id from {old_id} to {new_id}")
         
         await self.db.commit()
-        print(f"🔄 Chat ID migrated from {old_id} to {new_id}")
 
     async def delete_chat(self, chat_id: str):
         """Hapus chat dan pesan terkait dari database"""
-        # Hapus pesan dulu (opsional jika cascade delete sudah diatur di model, tapi cari aman)
-        stmt_msgs = select(Message).where(Message.chat_id == chat_id)
-        res_msgs = await self.db.execute(stmt_msgs)
-        for msg in res_msgs.scalars():
-            await self.db.delete(msg)
-            
-        stmt_chat = select(Chat).where(Chat.chat_id == chat_id)
+        stmt_chat = select(Chat).where(or_(Chat.chat_id == chat_id, Chat.id == chat_id))
         res_chat = await self.db.execute(stmt_chat)
         chat = res_chat.scalar_one_or_none()
         if chat:

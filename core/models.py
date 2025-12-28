@@ -44,7 +44,7 @@ class Message(Base):
     __tablename__ = "messages"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    chat_id = Column(ForeignKey("chats.chat_id"))
+    chat_id = Column(ForeignKey("chats.id"))
     role = Column(String) # 'user' or 'ai'
     content = Column(Text)
     image_url = Column(String, nullable=True) # Path file lokal atau URL
